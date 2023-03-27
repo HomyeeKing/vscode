@@ -8,13 +8,16 @@ import { IJSONContribution, ISuggestionsCollector } from './jsonContributions';
 import { XHRRequest } from 'request-light';
 import { Location } from 'jsonc-parser';
 
-import * as cp from 'child_process';
+import { execFile as _execFile } from 'child_process';
+import { promisify } from 'util';
 import { dirname } from 'path';
 import { fromNow } from './date';
 
 const LIMIT = 40;
 
 const USER_AGENT = 'Visual Studio Code';
+
+const execFile = promisify(_execFile);
 
 export class PackageJSONContribution implements IJSONContribution {
 
@@ -216,7 +219,8 @@ export class PackageJSONContribution implements IJSONContribution {
 		return null;
 	}
 
-	private getDocumentation(description: string | undefined, version: string | undefined, time: string | undefined, homepage: string | undefined): MarkdownString {
+	private getDocumentation(params:ViewPackageInfo): MarkdownString {
+    const {description,version,curUsedVersion,homepage,time} = params;
 		const str = new MarkdownString();
 		if (description) {
 			str.appendText(description);
@@ -225,6 +229,10 @@ export class PackageJSONContribution implements IJSONContribution {
 			str.appendText('\n\n');
 			str.appendText(time ? l10n.t("Latest version: {0} published {1}", version, fromNow(Date.parse(time), true, true)) : l10n.t("Latest version: {0}", version));
 		}
+    if(curUsedVersion){
+			str.appendText('\n\n');
+      str.appendText(l10n.t("Current used version: {0}", curUsedVersion));
+    }
 		if (homepage) {
 			str.appendText('\n\n');
 			str.appendText(homepage);
@@ -242,7 +250,7 @@ export class PackageJSONContribution implements IJSONContribution {
 
 			return this.fetchPackageInfo(name, resource).then(info => {
 				if (info) {
-					item.documentation = this.getDocumentation(info.description, info.version, info.time, info.homepage);
+					item.documentation = this.getDocumentation(info);
 					return item;
 				}
 				return null;
@@ -283,27 +291,25 @@ export class PackageJSONContribution implements IJSONContribution {
 	}
 
 	private npmView(npmCommandPath: string, pack: string, resource: Uri | undefined): Promise<ViewPackageInfo | undefined> {
-		return new Promise((resolve, _reject) => {
-			const args = ['view', '--json', pack, 'description', 'dist-tags.latest', 'homepage', 'version', 'time'];
-			const cwd = resource && resource.scheme === 'file' ? dirname(resource.fsPath) : undefined;
-			cp.execFile(npmCommandPath, args, { cwd }, (error, stdout) => {
-				if (!error) {
-					try {
-						const content = JSON.parse(stdout);
-						const version = content['dist-tags.latest'] || content['version'];
-						resolve({
-							description: content['description'],
-							version,
-							time: content.time?.[version],
-							homepage: content['homepage']
-						});
-						return;
-					} catch (e) {
-						// ignore
-					}
-				}
-				resolve(undefined);
-			});
+		const args = ['view', '--json', pack, 'description', 'dist-tags.latest', 'homepage', 'version', 'time'];
+		const cwd = resource && resource.scheme === 'file' ? dirname(resource.fsPath) : undefined;
+		const lsArgs = ['list', '--json', pack];
+		return Promise.all([execFile(npmCommandPath, lsArgs, { cwd }), execFile(npmCommandPath, args, { cwd })]).then(res => {
+      try {
+        const [{stdout:lsStdout},{stdout:viewStdout}] = res;
+        const lsContent = JSON.parse(lsStdout);
+        const viewContent = JSON.parse(viewStdout);
+        const latestVersion = viewContent['dist-tags.latest'] || viewContent['version'];
+        return {
+          curUsedVersion:lsContent.dependencies[pack].version,
+          description: viewContent['description'],
+          version:latestVersion,
+          time: viewContent.time?.[latestVersion],
+          homepage: viewContent['homepage']
+        };
+      } catch (error) {
+        return undefined;
+      }
 		});
 	}
 
@@ -338,7 +344,7 @@ export class PackageJSONContribution implements IJSONContribution {
 			if (typeof pack === 'string') {
 				return this.fetchPackageInfo(pack, resource).then(info => {
 					if (info) {
-						return [this.getDocumentation(info.description, info.version, info.time, info.homepage)];
+						return [this.getDocumentation(info)];
 					}
 					return null;
 				});
@@ -367,7 +373,7 @@ export class PackageJSONContribution implements IJSONContribution {
 			proposal.kind = CompletionItemKind.Property;
 			proposal.insertText = insertText;
 			proposal.filterText = JSON.stringify(name);
-			proposal.documentation = this.getDocumentation(pack.description, pack.version, undefined, pack?.links?.homepage);
+			proposal.documentation = this.getDocumentation(pack as ViewPackageInfo);
 			collector.add(proposal);
 		}
 	}
@@ -382,7 +388,9 @@ interface SearchPackageInfo {
 
 interface ViewPackageInfo {
 	description: string;
+	/**latest version */
 	version?: string;
+	curUsedVersion?: string;
 	time?: string;
 	homepage?: string;
 }
